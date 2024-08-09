@@ -5,7 +5,7 @@
 
 import socket
 import asyncio
-from tcputils import *
+from grader.tcputils import *
 
 
 class IP:
