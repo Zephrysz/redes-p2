@@ -35,14 +35,14 @@ class Servidor:
         if (flags & FLAGS_SYN) == FLAGS_SYN:
             # A flag SYN estar setada significa que é um cliente tentando estabelecer uma conexão nova
             # TODO: talvez você precise passar mais coisas para o construtor de conexão
-            conexao = self.conexoes[id_conexao] = Conexao(self, id_conexao)
+            conexao = self.conexoes[id_conexao] = Conexao(self, id_conexao, seq_no)
             # Passo 1
             syn_ack_flags = FLAGS_SYN | FLAGS_ACK
             ack_no = seq_no + 1 
             seq_no = int.from_bytes(os.urandom(4), byteorder="big")  
-            segmento_syn_ack = make_header(dst_port, src_port, seq_no, ack_no, syn_ack_flags)
-            segmento_syn_ack = fix_checksum(segmento_syn_ack, src_addr, dst_addr)
-            self.rede.enviar(segmento_syn_ack, src_addr)
+            segment_syn_ack = make_header(dst_port, src_port, seq_no, ack_no, syn_ack_flags)
+            segment_syn_ack = fix_checksum(segment_syn_ack, src_addr, dst_addr)
+            self.rede.enviar(segment_syn_ack, src_addr)
             if self.callback:
                 self.callback(conexao)
         elif id_conexao in self.conexoes:
@@ -54,9 +54,10 @@ class Servidor:
 
 
 class Conexao:
-    def __init__(self, servidor, id_conexao):
+    def __init__(self, servidor, id_conexao, seq_no):
         self.servidor = servidor
         self.id_conexao = id_conexao
+        self.seq_no = seq_no + 1 # proximo numero esperado eh o ack + 1 
         self.callback = None
         self.timer = asyncio.get_event_loop().call_later(1, self._exemplo_timer)  # um timer pode ser criado assim; esta linha é só um exemplo e pode ser removida
         #self.timer.cancel()   # é possível cancelar o timer chamando esse método; esta linha é só um exemplo e pode ser removida
@@ -66,10 +67,21 @@ class Conexao:
         print('Este é um exemplo de como fazer um timer')
 
     def _rdt_rcv(self, seq_no, ack_no, flags, payload):
-        # TODO: trate aqui o recebimento de segmentos provenientes da camada de rede.
-        # Chame self.callback(self, dados) para passar dados para a camada de aplicação após
-        # garantir que eles não sejam duplicados e que tenham sido recebidos em ordem.
-        print('recebido payload: %r' % payload)
+        # Passo 2
+        print("DEBUGGING", seq_no, self.seq_no, ack_no, flags)
+        if seq_no == self.seq_no : #expected seq received  
+            # print('recebido payload: %r' % payload)
+            if self.callback:
+                self.callback(self, payload)
+            self.seq_no += len(payload)
+
+            #pkt vazio 
+            src_addr, src_port, dst_addr, dst_port = self.id_conexao
+            seq_no = int.from_bytes(os.urandom(4), byteorder="big")  
+            ack_segment = make_header(dst_port, src_port, seq_no, self.seq_no, FLAGS_ACK) #self.seq_no eh o ack_no
+            ack_segment = fix_checksum(ack_segment, dst_addr, src_addr)
+            self.servidor.rede.enviar(ack_segment, src_addr)
+
 
     # Os métodos abaixo fazem parte da API
 
