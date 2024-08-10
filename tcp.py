@@ -34,13 +34,12 @@ class Servidor:
 
         if (flags & FLAGS_SYN) == FLAGS_SYN:
             # A flag SYN estar setada significa que é um cliente tentando estabelecer uma conexão nova
-            # TODO: talvez você precise passar mais coisas para o construtor de conexão
-            conexao = self.conexoes[id_conexao] = Conexao(self, id_conexao, seq_no)
             # Passo 1
-            syn_ack_flags = FLAGS_SYN | FLAGS_ACK
+            answer_seq = int.from_bytes(os.urandom(2), byteorder="big")  
+            conexao = self.conexoes[id_conexao] = Conexao(self, id_conexao, seq_no, answer_seq)
             ack_no = seq_no + 1 
-            seq_no = int.from_bytes(os.urandom(4), byteorder="big")  
-            segment_syn_ack = make_header(dst_port, src_port, seq_no, ack_no, syn_ack_flags)
+            syn_ack_flags = FLAGS_SYN | FLAGS_ACK
+            segment_syn_ack = make_header(dst_port, src_port, answer_seq , ack_no, syn_ack_flags)
             segment_syn_ack = fix_checksum(segment_syn_ack, src_addr, dst_addr)
             self.rede.enviar(segment_syn_ack, src_addr)
             if self.callback:
@@ -54,10 +53,12 @@ class Servidor:
 
 
 class Conexao:
-    def __init__(self, servidor, id_conexao, seq_no):
+    def __init__(self, servidor, id_conexao, seq_no, answer_seq):
         self.servidor = servidor
         self.id_conexao = id_conexao
-        self.seq_no = seq_no + 1 # proximo numero esperado eh o ack + 1 
+        self.seq_no = seq_no # seq do serv 
+        self.answer_seq = answer_seq
+        self.ack_no = seq_no+1 # seq do cliente + 1 
         self.callback = None
         self.timer = asyncio.get_event_loop().call_later(1, self._exemplo_timer)  # um timer pode ser criado assim; esta linha é só um exemplo e pode ser removida
         #self.timer.cancel()   # é possível cancelar o timer chamando esse método; esta linha é só um exemplo e pode ser removida
@@ -67,20 +68,25 @@ class Conexao:
         print('Este é um exemplo de como fazer um timer')
 
     def _rdt_rcv(self, seq_no, ack_no, flags, payload):
+        # print("chega aq?")
         # Passo 2
-        print("DEBUGGING", seq_no, self.seq_no, ack_no, flags)
-        if seq_no == self.seq_no : #expected seq received  
-            # print('recebido payload: %r' % payload)
-            if self.callback:
-                self.callback(self, payload)
-            self.seq_no += len(payload)
+        if seq_no != self.ack_no : #expected seq not received  
+            return
 
-            #pkt vazio 
-            src_addr, src_port, dst_addr, dst_port = self.id_conexao
-            seq_no = int.from_bytes(os.urandom(4), byteorder="big")  
-            ack_segment = make_header(dst_port, src_port, seq_no, self.seq_no, FLAGS_ACK) #self.seq_no eh o ack_no
-            ack_segment = fix_checksum(ack_segment, dst_addr, src_addr)
-            self.servidor.rede.enviar(ack_segment, src_addr)
+        if (len(payload) == 0) and ((flags & FLAGS_ACK) == FLAGS_ACK):
+            # print("pra n responde ACK com ACK sla ")
+            return
+        if self.callback:
+            self.callback(self, payload)
+        self.ack_no += len(payload)
+        self.seq_no = ack_no
+
+
+        #pkt vazio 
+        src_addr, src_port, dst_addr, dst_port = self.id_conexao
+        ack_segment = make_header(dst_port, src_port, self.seq_no, self.ack_no, FLAGS_ACK) #header + vazio
+        ack_segment = fix_checksum(ack_segment, dst_addr, src_addr)
+        self.servidor.rede.enviar(ack_segment, src_addr)
 
 
     # Os métodos abaixo fazem parte da API
@@ -96,6 +102,17 @@ class Conexao:
         """
         Usado pela camada de aplicação para enviar dados
         """
+        src_addr, src_port, dst_addr, dst_port = self.id_conexao
+        for i in range(0, len(dados), MSS):
+            dados_parsed = dados[i:i+MSS]
+            # Cria um segmento com o número de sequência atual e o número de reconhecimento atual\
+            segmento = make_header(dst_port, src_port, self.answer_seq+1, self.ack_no, FLAGS_ACK) + dados_parsed
+            segmento = fix_checksum(segmento, dst_addr, src_addr)
+            # print("chego", dados[:10])
+            self.servidor.rede.enviar(segmento, dst_addr)
+            self.answer_seq += len(dados_parsed) 
+
+
         # TODO: implemente aqui o envio de dados.
         # Chame self.servidor.rede.enviar(segmento, dest_addr) para enviar o segmento
         # que você construir para a camada de rede.
