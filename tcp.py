@@ -60,12 +60,21 @@ class Conexao:
         self.answer_seq = answer_seq
         self.ack_no = seq_no+1 # seq do cliente + 1 
         self.callback = None
-        self.timer = asyncio.get_event_loop().call_later(1, self._exemplo_timer)  # um timer pode ser criado assim; esta linha é só um exemplo e pode ser removida
+        self.timer = asyncio.get_event_loop().call_later(0.5, self._timer)  # um timer pode ser criado assim; esta linha é só um exemplo e pode ser removida
+        self.last_sent_segment = b''
         #self.timer.cancel()   # é possível cancelar o timer chamando esse método; esta linha é só um exemplo e pode ser removida
 
-    def _exemplo_timer(self):
-        # Esta função é só um exemplo e pode ser removida
-        print('Este é um exemplo de como fazer um timer')
+    def _timer(self):
+        # print(f'timer para {self.seq_no}')
+        if self.last_sent_segment:
+            src_addr, src_port, dst_addr, dst_port = self.id_conexao
+            ack_segment = make_header(dst_port, src_port, self.seq_no, self.ack_no, FLAGS_ACK) + self.last_sent_segment[:MSS]
+            print("AQUI", self.last_sent_segment[:10])
+            self.last_sent_segment = self.last_sent_segment[MSS:]
+            ack_segment = fix_checksum(ack_segment, dst_addr, src_addr)
+            self.servidor.rede.enviar(ack_segment, src_addr) 
+            self.timer = asyncio.get_event_loop().call_later(0.5, self._timer)
+            print("here")
 
     def _rdt_rcv(self, seq_no, ack_no, flags, payload):
         # Passo 2
@@ -73,16 +82,28 @@ class Conexao:
             print("expected seq not received")
             return
 
+        self.seq_no = ack_no
+        
+        # passo 5 
         if (len(payload) == 0) and ((flags & FLAGS_ACK) == FLAGS_ACK) and ((flags & FLAGS_FIN) != FLAGS_FIN)  :
-            print("pra n responde ACK com ACK sla ")
+            # print("na real eh pra caso n tenha chego pacotes ainda")           
+            self.timer.cancel()
+            self.last_sent_segment = self.last_sent_segment[ack_no - self.seq_no :]
+            self.seq_no = ack_no
+
+            if ack_no < self.answer_seq: # pacotes sobrando
+                self.timer = asyncio.get_event_loop().call_later(1, self._timer)
+
             return
+        
+        
+        self.ack_no += len(payload) if len(payload) > 0 else 1 # passo 4 
         
         if self.callback:
             self.callback(self, payload)
-        self.ack_no += len(payload) if len(payload) > 0 else 1 # passo 4 
-        self.seq_no = ack_no
 
-        #pkt vazio 
+
+        #pkt vazio com ACK 
         src_addr, src_port, dst_addr, dst_port = self.id_conexao
         ack_segment = make_header(dst_port, src_port, self.seq_no, self.ack_no, FLAGS_ACK) #header + vazio
         ack_segment = fix_checksum(ack_segment, dst_addr, src_addr)
@@ -104,6 +125,7 @@ class Conexao:
         """
         Usado pela camada de aplicação para enviar dados
         """
+        self.last_sent_segment = b''
         src_addr, src_port, dst_addr, dst_port = self.id_conexao
         for i in range(0, len(dados), MSS):
             dados_parsed = dados[i:i+MSS]
@@ -113,6 +135,10 @@ class Conexao:
             # print("chego", dados[:10])
             self.servidor.rede.enviar(segmento, dst_addr)
             self.answer_seq += len(dados_parsed) 
+            self.last_sent_segment += dados_parsed
+            if self.timer.cancelled():
+                self.timer = asyncio.get_event_loop().call_later(1, self._timer)
+
         
 
         # TODO: implemente aqui o envio de dados.
@@ -126,9 +152,9 @@ class Conexao:
         """
         # Passo 4
         src_addr, src_port, dst_addr, dst_port = self.id_conexao
-        ack_segment = make_header(dst_port, src_port, self.seq_no, self.ack_no, FLAGS_FIN) #header + vazio
-        ack_segment = fix_checksum(ack_segment, dst_addr, src_addr)
-        self.servidor.rede.enviar(ack_segment, src_addr)
+        fin_segment = make_header(dst_port, src_port, self.seq_no, self.ack_no, FLAGS_FIN) #header + vazio
+        fin_segment = fix_checksum(fin_segment, dst_addr, src_addr)
+        self.servidor.rede.enviar(fin_segment, src_addr)    
         
         # TODO: implemente aqui o fechamento de conexão
         pass
