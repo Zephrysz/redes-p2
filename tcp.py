@@ -1,5 +1,7 @@
 import asyncio
 import os 
+import time 
+
 from grader.tcputils import *
 
 
@@ -60,21 +62,34 @@ class Conexao:
         self.answer_seq = answer_seq
         self.ack_no = seq_no+1 # seq do cliente + 1 
         self.callback = None
-        self.timer = asyncio.get_event_loop().call_later(0.5, self._timer)  # um timer pode ser criado assim; esta linha é só um exemplo e pode ser removida
+        self.timer = asyncio.get_event_loop().call_later(0, self._timer)  
         self.last_sent_segment = b''
         #self.timer.cancel()   # é possível cancelar o timer chamando esse método; esta linha é só um exemplo e pode ser removida
+        
+        self.estimated_rtt = None
+        self.dev_rtt = None 
+        self.timeout_interval = 1  
+        self.timer_start = float()
+
+
+    def _start_timer(self):
+        if self.timer:
+            self.timer.cancel()
+        if self.last_sent_segment:
+            self.timer = asyncio.get_event_loop().call_later(self.timeout_interval, self._timer)
+            
+
+
 
     def _timer(self):
-        # print(f'timer para {self.seq_no}')
-        if self.last_sent_segment:
-            src_addr, src_port, dst_addr, dst_port = self.id_conexao
-            ack_segment = make_header(dst_port, src_port, self.seq_no, self.ack_no, FLAGS_ACK) + self.last_sent_segment[:MSS]
-            print("AQUI", self.last_sent_segment[:10])
-            self.last_sent_segment = self.last_sent_segment[MSS:]
-            ack_segment = fix_checksum(ack_segment, dst_addr, src_addr)
-            self.servidor.rede.enviar(ack_segment, src_addr) 
-            self.timer = asyncio.get_event_loop().call_later(0.5, self._timer)
-            print("here")
+        src_addr, src_port, dst_addr, dst_port = self.id_conexao
+        ack_segment = make_header(dst_port, src_port, self.seq_no, self.ack_no, FLAGS_ACK) + self.last_sent_segment[:MSS]
+        print("AQUI", self.last_sent_segment[:10], len(self.last_sent_segment))
+        ack_segment = fix_checksum(ack_segment, dst_addr, src_addr)
+        self.last_sent_segment = self.last_sent_segment[MSS:]
+        self.servidor.rede.enviar(ack_segment, src_addr)  
+        # print(f"foi enviado o ultimo segmento, faltando: {self.last_sent_segment[:10]}" )
+        # self._start_timer()
 
     def _rdt_rcv(self, seq_no, ack_no, flags, payload):
         # Passo 2
@@ -83,31 +98,30 @@ class Conexao:
             return
 
         self.seq_no = ack_no
-        
-        # passo 5 
-        if (len(payload) == 0) and ((flags & FLAGS_ACK) == FLAGS_ACK) and ((flags & FLAGS_FIN) != FLAGS_FIN)  :
-            # print("na real eh pra caso n tenha chego pacotes ainda")           
-            self.timer.cancel()
-            self.last_sent_segment = self.last_sent_segment[ack_no - self.seq_no :]
-            self.seq_no = ack_no
 
-            if ack_no < self.answer_seq: # pacotes sobrando
-                self.timer = asyncio.get_event_loop().call_later(1, self._timer)
 
-            return
-        
-        
+            
+
+        # passo 5 e 6 
+        # eu n sei oq ta conteceno aq pra fala a vdd, eu so estava brincando e funcionou '-'(certamente esta errado)
+        if (len(payload) == 0) and ((flags & FLAGS_ACK) == FLAGS_ACK):
+            if self.last_sent_segment:
+                self._start_timer()
+                self.calc_rtt()
+                return
+            elif ((flags & FLAGS_FIN) != FLAGS_FIN):
+                return
+
         self.ack_no += len(payload) if len(payload) > 0 else 1 # passo 4 
         
         if self.callback:
             self.callback(self, payload)
 
-
         #pkt vazio com ACK 
         src_addr, src_port, dst_addr, dst_port = self.id_conexao
         ack_segment = make_header(dst_port, src_port, self.seq_no, self.ack_no, FLAGS_ACK) #header + vazio
         ack_segment = fix_checksum(ack_segment, dst_addr, src_addr)
-        self.servidor.rede.enviar(ack_segment, src_addr)
+        self.servidor.rede.enviar(ack_segment, dst_addr) 
         if (flags & FLAGS_FIN) == FLAGS_FIN:
             del self.servidor.conexoes[self.id_conexao]
 
@@ -134,10 +148,10 @@ class Conexao:
             segmento = fix_checksum(segmento, dst_addr, src_addr)
             # print("chego", dados[:10])
             self.servidor.rede.enviar(segmento, dst_addr)
+            self.timer_start = time.time() # passo 6 
             self.answer_seq += len(dados_parsed) 
             self.last_sent_segment += dados_parsed
-            if self.timer.cancelled():
-                self.timer = asyncio.get_event_loop().call_later(1, self._timer)
+        self._start_timer()
 
         
 
@@ -154,7 +168,25 @@ class Conexao:
         src_addr, src_port, dst_addr, dst_port = self.id_conexao
         fin_segment = make_header(dst_port, src_port, self.seq_no, self.ack_no, FLAGS_FIN) #header + vazio
         fin_segment = fix_checksum(fin_segment, dst_addr, src_addr)
-        self.servidor.rede.enviar(fin_segment, src_addr)    
+        self.servidor.rede.enviar(fin_segment, dst_addr)     
         
         # TODO: implemente aqui o fechamento de conexão
         pass
+
+    def calc_rtt(self):
+        #passo 6 
+        # print("hererererere", self.ack_no, self.answer_seq, self.seq_no, self.ack_times)
+        sample_rtt = time.time() - self.timer_start
+        # print(sample_rtt)
+        if self.estimated_rtt is None: # primeiro sample_rtt 
+            self.estimated_rtt = sample_rtt 
+            self.dev_rtt = sample_rtt / 2
+        else: # recalcular baseado nas equacoes do livro 
+            alpha = 0.125
+            beta = 0.25
+            self.estimated_rtt = ((1 - alpha) * self.estimated_rtt ) + ( alpha * sample_rtt)
+            self.dev_rtt =( (1 - beta) * self.dev_rtt) + (beta * abs(sample_rtt - self.estimated_rtt))
+
+        self.timeout_interval = self.estimated_rtt + (4 * self.dev_rtt)
+        # print(f"timeout_interval: {self.timeout_interval:.2f}, estimated_rtt: {self.estimated_rtt:.2f}, dev_rtt: {self.dev_rtt:.2f}")
+        
